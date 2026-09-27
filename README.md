@@ -6,7 +6,7 @@
 
 # AvarionX Antivirus 
 
-### Free Windows malware protection without ads, and tracking.
+### A free Windows malware scanner without ads, and tracking.
 
 
 [![Release](https://img.shields.io/github/v/release/phsycologicalFudge/AvarionX-Windows-Antivirus?logo=github&label=release&color=6366f1)](https://github.com/phsycologicalFudge/AvarionX-Windows-Antivirus/releases)
@@ -44,7 +44,36 @@ AvarionX Antivirus (CS Security) operates through a multi-layered detection pipe
 
 ### Machine Learning (ML+)
 
-AvarionX Security includes a dual ML system named ML+
+AvarionX Security includes a dual ML system named ML+. The Windows version is not yet available, but the engine retains its Android ML models.
 
 * Legacy MUniverse Tag: Suspicious applications that meet the scoring system's requirements are dubbed with a MUniverse (Malware Universe) tag.
 * Current versions use an upgraded heuristics model, with the tag: Win/VXgen2
+
+### Third Party Attributions
+
+This project includes code derived from [exav](https://github.com/sylvinus/exav/tree/main/crates) by Sylvain Zimmer, under the MIT License. The version included for AvarionX has been substantially modified and is independently maintained as part of this project, under the terms of the MIT licence below:
+
+```
+MIT License
+
+Copyright (c) 2026 Sylvain Zimmer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
