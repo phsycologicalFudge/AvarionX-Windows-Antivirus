@@ -12,7 +12,7 @@ pub mod detection {
 pub mod monitoring {
     pub mod download_watch;
     pub mod process_snapshot;
-    pub mod wmi_watch;
+    pub mod etw_watch;
 }
 pub mod service {
     pub mod control;

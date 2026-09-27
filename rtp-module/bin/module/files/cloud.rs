@@ -146,20 +146,23 @@ fn log_cloud_failure(msg: &str) {
     log_line(&self_dir().join("rtp_logs"), msg);
 }
 
-pub fn cloud_check_batch(hashes: &[String], api_key: &str) -> Vec<String> {
+pub fn cloud_check_batch_result(hashes: &[String], api_key: &str) -> Result<Vec<String>, String> {
     if hashes.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let result = ureq::post(CLOUD_CHECK_ENDPOINT)
+    let resp = ureq::post(CLOUD_CHECK_ENDPOINT)
         .timeout(CLOUD_CHECK_TIMEOUT)
         .set("Content-Type", "application/json")
         .set("x-cs-key", api_key)
-        .send_json(json!(hashes));
-    match result {
-        Ok(resp) => {
-            let data: Value = resp.into_json().unwrap_or_else(|_| json!({}));
-            data.get("found").and_then(|f| f.as_array()).map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()).unwrap_or_default()
-        }
+        .send_json(json!(hashes))
+        .map_err(|e| e.to_string())?;
+    let data: Value = resp.into_json().map_err(|e| e.to_string())?;
+    Ok(data.get("found").and_then(|f| f.as_array()).map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()).unwrap_or_default())
+}
+
+pub fn cloud_check_batch(hashes: &[String], api_key: &str) -> Vec<String> {
+    match cloud_check_batch_result(hashes, api_key) {
+        Ok(found) => found,
         Err(e) => {
             log_cloud_failure(&format!("cloud check failed: {}", e));
             Vec::new()

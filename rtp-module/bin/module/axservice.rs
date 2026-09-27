@@ -11,8 +11,8 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use crate::files::cloud::run_cloud_auth_loop;
 use crate::files::detection::defs::{ensure_defs_unpacked, run_update_check};
 use crate::files::monitoring::download_watch::run_download_watchers;
+use crate::files::monitoring::etw_watch::run_etw_loop;
 use crate::files::monitoring::process_snapshot::{run_snapshot_loop, snapshot_processes};
-use crate::files::monitoring::wmi_watch::run_wmi_loop;
 use crate::files::service::control::{install_service, run_as_service, start_existing_service, stop_service, uninstall_service};
 use crate::files::service::single_instance::acquire_single_instance;
 use crate::files::util::{log_line, self_dir};
@@ -178,7 +178,7 @@ pub fn run_core() {
         let snap_logs = proc_logs.clone();
         let mut snap_known = known.clone();
         std::thread::spawn(move || run_snapshot_loop(&mut snap_known, &snap_logs));
-        run_wmi_loop(&mut known, &proc_logs);
+        run_etw_loop(&mut known, &proc_logs);
     });
 
     loop {
