@@ -3,11 +3,13 @@ import 'dart:isolate';
 import 'antivirus_bridge.dart';
 
 typedef ScanEntryHandler = void Function(String path, String entry);
+typedef ScanProgressHandler = void Function(int scanned);
 
 class ScanLogListener {
   static Isolate? _iso;
   static ReceivePort? _receive;
   static ScanEntryHandler? _handler;
+  static ScanProgressHandler? _progressHandler;
   static Future<void>? _starting;
 
   static Future<void> ensureStarted() {
@@ -20,7 +22,10 @@ class ScanLogListener {
     _receive = receive;
     _iso = await Isolate.spawn(_entry, receive.sendPort);
     receive.listen((msg) {
-      if (msg is Map && msg['path'] is String && msg['entry'] is String) {
+      if (msg is! Map) return;
+      if (msg['event'] == 'dir_progress' && msg['scanned'] is int) {
+        _progressHandler?.call(msg['scanned'] as int);
+      } else if (msg['path'] is String && msg['entry'] is String) {
         _handler?.call(msg['path'] as String, msg['entry'] as String);
       }
     });
@@ -28,6 +33,10 @@ class ScanLogListener {
 
   static void setHandler(ScanEntryHandler? handler) {
     _handler = handler;
+  }
+
+  static void setProgressHandler(ScanProgressHandler? handler) {
+    _progressHandler = handler;
   }
 
   @pragma('vm:entry-point')
@@ -43,6 +52,11 @@ class ScanLogListener {
               final entry = decoded['entry'];
               if (path is String && entry is String) {
                 root.send({'path': path, 'entry': entry});
+              }
+            } else if (decoded is Map && decoded['event'] == 'dir_progress') {
+              final scanned = decoded['scanned'];
+              if (scanned is int) {
+                root.send({'event': 'dir_progress', 'scanned': scanned});
               }
             }
           } catch (_) {}

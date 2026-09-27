@@ -4,15 +4,10 @@ import 'dart:io';
 import 'dart:isolate';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import '../services/cache_manager.dart';
-import '../services/cloud/cloud_auth_service.dart';
-import '../services/cloud_helper_service.dart';
 import '../services/quarantine_service.dart';
-import '../utils/hash_cache_worker.dart';
 import 'core/antivirus_bridge.dart';
-
-const _cloudEligibleExtensions = {'.apk', '.exe', '.dll', '.msi'};
+import 'core/scan_log_listener.dart';
 
 enum ScanMode { smart, single, custom, pc }
 enum ScanState { idle, scanning, result }
@@ -178,19 +173,14 @@ class _ScanScreenState extends State<ScanScreen> {
   int cleanCount = 0;
 
   String targetPath = '';
-  int targetBytes = 0;
 
   final List<DetectionResult> infected = [];
 
   final List<String> logs = [];
   final ScrollController _logScroll = ScrollController();
+  final ValueNotifier<int> _scannedLive = ValueNotifier<int>(0);
 
   ScanWorker? _worker;
-  Timer? _uiTimer;
-
-  DateTime? _scanStart;
-  Duration _eta = Duration.zero;
-  double _progress = 0.0;
 
   @override
   void initState() {
@@ -207,9 +197,10 @@ class _ScanScreenState extends State<ScanScreen> {
 
   @override
   void dispose() {
-    _uiTimer?.cancel();
+    ScanLogListener.setProgressHandler(null);
     _worker?.dispose();
     _logScroll.dispose();
+    _scannedLive.dispose();
     super.dispose();
   }
 
@@ -231,12 +222,9 @@ class _ScanScreenState extends State<ScanScreen> {
     infectedCount = 0;
     cleanCount = 0;
     targetPath = '';
-    targetBytes = 0;
     infected.clear();
     logs.clear();
-    _scanStart = null;
-    _eta = Duration.zero;
-    _progress = 0.0;
+    _scannedLive.value = 0;
   }
 
   void _handleBack() {
@@ -253,8 +241,8 @@ class _ScanScreenState extends State<ScanScreen> {
   void _cancelScan({required bool goIdle}) {
     _scanning = false;
     _busy = false;
-    _uiTimer?.cancel();
-    _uiTimer = null;
+    requestScanCancel();
+    ScanLogListener.setProgressHandler(null);
     _worker?.dispose();
     _worker = null;
 
@@ -301,68 +289,19 @@ class _ScanScreenState extends State<ScanScreen> {
     };
   }
 
-  Future<_EnumResult> _enumerateAndSize(String path) async {
-    final type = FileSystemEntity.typeSync(path);
-
-    if (type == FileSystemEntityType.file) {
-      try {
-        final f = File(path);
-        final len = await f.length();
-        return _EnumResult(files: [path], totalBytes: len);
-      } catch (_) {
-        return _EnumResult(files: [path], totalBytes: 0);
-      }
+  void _onScanProgress(int scanned) {
+    if (scanned > _scannedLive.value) {
+      _scannedLive.value = scanned;
     }
-
-    final files = <String>[];
-    int bytes = 0;
-
-    try {
-      final dir = Directory(path);
-      await for (final entity in dir.list(recursive: true, followLinks: false)) {
-        if (entity is File) {
-          files.add(entity.path);
-          try {
-            bytes += await entity.length();
-          } catch (_) {}
-        }
-      }
-    } catch (_) {}
-
-    return _EnumResult(files: files, totalBytes: bytes);
   }
 
-  Duration _estimateEtaFromBytes(int bytes, int fileCount) {
-    if (bytes <= 0) return const Duration(seconds: 3);
-
-    final gb = bytes / (1024 * 1024 * 1024);
-    final minutes = gb * 0.2;
-    var secs = minutes * 60;
-
-    if (fileCount <= 200) secs *= 0.55;
-    if (fileCount <= 50) secs *= 0.40;
-
-    secs = secs.clamp(3.0, 60.0 * 60.0 * 24.0);
-    return Duration(seconds: secs.round());
-  }
-
-  void _startUiTicker() {
-    _uiTimer?.cancel();
-    _uiTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
-      if (!_scanning || _scanStart == null) return;
-
-      final elapsed = DateTime.now().difference(_scanStart!);
-      final etaSecs = _eta.inSeconds;
-      if (etaSecs <= 0) return;
-
-      final denom = _eta.inMilliseconds == 0 ? 1 : _eta.inMilliseconds;
-      final p = (elapsed.inMilliseconds / denom).clamp(0.0, 0.995);
-
-      if (!mounted) return;
-      setState(() {
-        _progress = p;
-      });
-    });
+  static String _statsLine(Object? stats) {
+    if (stats is! Map) return 'stats unavailable';
+    final Map c = stats['cloud'] is Map ? stats['cloud'] as Map : <String, dynamic>{};
+    return 'complete=${stats['complete']} scanned=${stats['scanned']} '
+        'skipped=${stats['skipped']} errors=${stats['errors']} '
+        'cloud=${c['state']} checked=${c['checked']} failed=${c['failed']} '
+        'dropped=${c['dropped']} ms=${stats['ms']}';
   }
 
   Future<void> _startScan(ScanMode m) async {
@@ -375,6 +314,15 @@ class _ScanScreenState extends State<ScanScreen> {
       _resetUi();
     });
 
+    try {
+      await _runScan(m);
+    } catch (err) {
+      debugPrint('[scan] failed: $err');
+      _cancelScan(goIdle: true);
+    }
+  }
+
+  Future<void> _runScan(ScanMode m) async {
     String? pickedPath;
 
     if (m == ScanMode.single) {
@@ -401,22 +349,9 @@ class _ScanScreenState extends State<ScanScreen> {
     _pushLog('Starting scan');
     _pushLog('Target: $targetPath');
 
-    final enumRes = await _enumerateAndSize(targetPath);
+    ScanLogListener.setProgressHandler(_onScanProgress);
+    await ScanLogListener.ensureStarted();
     if (!_scanning || !mounted) return;
-
-    total = enumRes.files.length;
-    targetBytes = enumRes.totalBytes;
-
-    _eta = _estimateEtaFromBytes(targetBytes, total);
-    _scanStart = DateTime.now();
-    _progress = 0.0;
-
-    _pushLog('Files: $total');
-    _pushLog('Estimated time: ${_fmtDuration(_eta)}');
-
-    _startUiTicker();
-
-    final cloudHitsFuture = _findCloudHits(enumRes.files);
 
     _worker?.dispose();
     _worker = await ScanWorker.spawn();
@@ -424,7 +359,13 @@ class _ScanScreenState extends State<ScanScreen> {
     final res = await _worker!.scan(targetPath);
     if (!_scanning || !mounted) return;
 
-    final cloudHitPaths = await cloudHitsFuture;
+    final stats = res?['stats'];
+    if (res == null) {
+      debugPrint('[scan] no result (timeout)');
+    } else if (res['error'] != null) {
+      debugPrint('[scan] engine error: ${res['error']}');
+    }
+    debugPrint('[scan] ${_statsLine(stats)}');
 
     infected.clear();
 
@@ -470,51 +411,17 @@ class _ScanScreenState extends State<ScanScreen> {
       }
     }
 
-    final nativeHitPaths = (res?['hits'] is Map)
-        ? (res!['hits'] as Map).keys.map((k) => k.toString()).toSet()
-        : <String>{};
-
-    for (final path in cloudHitPaths) {
-      if (nativeHitPaths.contains(path)) continue;
-
-      final displayName = path.contains(Platform.pathSeparator)
-          ? path.split(Platform.pathSeparator).last
-          : path;
-
-      infected.add(
-        DetectionResult(
-          name: displayName,
-          label: structuredHashLabel(path),
-          confidence: 1.0,
-          signals: const ['HashMatch'],
-        ),
-      );
-
-      try {
-        final f = File(path);
-        if (await f.exists()) {
-          unawaited(
-            QuarantineService.quarantineFile(
-              path,
-              label: structuredHashLabel(path),
-              confidence: 1.0,
-            ),
-          );
-        }
-      } catch (_) {}
-    }
-
     infectedCount = infected.length;
+    final scanned = stats is Map ? stats['scanned'] : null;
+    total = scanned is int ? scanned : (m == ScanMode.single ? 1 : 0);
     cleanCount = (total - infectedCount).clamp(0, total);
 
     await CacheManager.clearAll();
     if (!_scanning || !mounted) return;
 
-    _uiTimer?.cancel();
-    _uiTimer = null;
+    ScanLogListener.setProgressHandler(null);
 
     setState(() {
-      _progress = 1.0;
       state = ScanState.result;
     });
 
@@ -522,62 +429,6 @@ class _ScanScreenState extends State<ScanScreen> {
     _busy = false;
     _worker?.dispose();
     _worker = null;
-  }
-
-  Future<Set<String>> _findCloudHits(List<String> files) async {
-    final eligible = files.where((p) {
-      final dot = p.lastIndexOf('.');
-      if (dot < 0) return false;
-      return _cloudEligibleExtensions.contains(p.substring(dot).toLowerCase());
-    }).toList();
-
-    if (eligible.isEmpty) return const {};
-
-    HashCacheWorker? hashWorker;
-    try {
-      final dir = await getApplicationSupportDirectory();
-      hashWorker = await HashCacheWorker.spawn('${dir.path}/hashcache.bin');
-
-      final hashes = await hashWorker.hashBatch(eligible);
-      if (hashes.isEmpty) return const {};
-
-      final hashToPath = <String, String>{};
-      hashes.forEach((path, pair) {
-        final md5 = pair['md5'] ?? '';
-        final sha = pair['sha'] ?? '';
-        if (md5.isNotEmpty) hashToPath[md5] = path;
-        if (sha.isNotEmpty) hashToPath[sha] = path;
-      });
-
-      if (hashToPath.isEmpty) return const {};
-
-      final cloud = CloudScanner(
-        endpoint: 'https://api.colourswift.com/hash_cloud',
-        apiKey: CloudAuthService.sessionToken ?? '',
-      );
-
-      final hits = await cloud.checkBatch(hashToPath.keys.toList());
-      final hitPaths = <String>{};
-      for (final h in hits) {
-        final path = hashToPath[h];
-        if (path != null) hitPaths.add(path);
-      }
-      return hitPaths;
-    } catch (_) {
-      return const {};
-    } finally {
-      await hashWorker?.close();
-    }
-  }
-
-  static String _fmtDuration(Duration d) {
-    if (d.inSeconds < 60) return '${d.inSeconds}s';
-    final m = d.inMinutes;
-    final s = d.inSeconds % 60;
-    if (m < 60) return '${m}m ${s}s';
-    final h = d.inHours;
-    final rm = d.inMinutes % 60;
-    return '${h}h ${rm}m';
   }
 
   @override
@@ -657,11 +508,6 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   Widget _buildScanning(ThemeData theme, TextTheme text, ColorScheme cs) {
-    final elapsed = _scanStart == null ? Duration.zero : DateTime.now().difference(_scanStart!);
-    final remain = _eta.inSeconds <= 0
-        ? Duration.zero
-        : Duration(seconds: (_eta.inSeconds - elapsed.inSeconds).clamp(0, _eta.inSeconds));
-
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -678,24 +524,21 @@ class _ScanScreenState extends State<ScanScreen> {
           overflow: TextOverflow.ellipsis,
         ),
         const SizedBox(height: 14),
-        LinearProgressIndicator(value: _progress),
+        const LinearProgressIndicator(),
         const SizedBox(height: 10),
         Row(
           children: [
             Expanded(
-              child: Text(
-                'ETA: ${_fmtDuration(remain)}',
-                style: text.bodySmall?.copyWith(color: cs.onSurface.withOpacity(0.75)),
+              child: mode == ScanMode.single
+                  ? const SizedBox.shrink()
+                  : ValueListenableBuilder<int>(
+                valueListenable: _scannedLive,
+                builder: (_, v, __) => Text(
+                  'Files scanned: $v',
+                  style: text.bodySmall?.copyWith(color: cs.onSurface.withOpacity(0.75)),
+                ),
               ),
             ),
-            Text(
-              '${(_progress * 100).floor()}%',
-              style: text.bodySmall?.copyWith(
-                color: cs.onSurface.withOpacity(0.75),
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            const SizedBox(width: 12),
             TextButton.icon(
               onPressed: () => _cancelScan(goIdle: true),
               icon: const Icon(Icons.stop_rounded),
@@ -782,55 +625,61 @@ class _ScanScreenState extends State<ScanScreen> {
               color: cs.surface.withOpacity(0.55),
               borderRadius: BorderRadius.circular(16),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (var i = 0; i < infected.length; i++) ...[
-                  if (i > 0)
-                    Divider(
-                      height: 1,
-                      color: cs.onSurface.withOpacity(0.08),
-                    ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.warning_amber_rounded,
-                          size: 18,
-                          color: cs.error,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 280),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.only(right: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (var i = 0; i < infected.length; i++) ...[
+                      if (i > 0)
+                        Divider(
+                          height: 1,
+                          color: cs.onSurface.withOpacity(0.08),
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                infected[i].name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: text.bodyMedium?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.warning_amber_rounded,
+                              size: 18,
+                              color: cs.error,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    infected[i].name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: text.bodyMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    infected[i].label,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: text.bodySmall?.copyWith(
+                                      color: cs.error.withOpacity(0.9),
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
                               ),
-                              const SizedBox(height: 2),
-                              Text(
-                                infected[i].label,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: text.bodySmall?.copyWith(
-                                  color: cs.error.withOpacity(0.9),
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
-                          ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                  ),
-                ],
-              ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ),
           ),
         ],
@@ -936,13 +785,6 @@ class _ScanButton extends StatelessWidget {
   }
 }
 
-class _EnumResult {
-  final List<String> files;
-  final int totalBytes;
-
-  const _EnumResult({required this.files, required this.totalBytes});
-}
-
 class ScanWorker {
   final SendPort sendPort;
   final Isolate _isolate;
@@ -970,18 +812,22 @@ class ScanWorker {
         final raw = bridge.scanFile(path);
         final decoded = jsonDecode(raw);
         final hits = decoded['hits'] as Map?;
-        if (hits == null || hits.isEmpty) {
-          send.send(null);
-        } else {
-          send.send({'hits': hits});
+
+        Map? stats;
+        final statsRaw = bridge.scanStats();
+        if (statsRaw != null) {
+          final parsed = jsonDecode(statsRaw);
+          if (parsed is Map) stats = parsed;
         }
-      } catch (_) {
-        send.send(null);
+
+        send.send({'hits': hits ?? <String, dynamic>{}, 'stats': stats});
+      } catch (err) {
+        send.send({'error': err.toString()});
       }
     });
   }
 
-  Future<dynamic> scan(String path) async {
+  Future<Map?> scan(String path) async {
     final port = ReceivePort();
     sendPort.send([port.sendPort, path]);
 
@@ -991,7 +837,7 @@ class ScanWorker {
     );
 
     port.close();
-    return result;
+    return result is Map ? result : null;
   }
 
   void dispose() {

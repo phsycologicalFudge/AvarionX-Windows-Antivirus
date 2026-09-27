@@ -7,6 +7,9 @@ typedef ScanLogFn = void Function(String msg);
 typedef ClearScanCbNative = Void Function();
 typedef ClearScanCbDart = void Function();
 
+typedef AvCancelScanNative = Int32 Function();
+typedef AvCancelScanDart = int Function();
+
 String _resolveLibPath() {
   if (Platform.isAndroid) {
     return "libcolourswift_av.so";
@@ -23,6 +26,16 @@ void clearScanCallback() {
     final lib = DynamicLibrary.open(_resolveLibPath());
     final fn = lib.lookupFunction<ClearScanCbNative, ClearScanCbDart>(
       'clear_scan_callback',
+    );
+    fn();
+  } catch (_) {}
+}
+
+void requestScanCancel() {
+  try {
+    final lib = DynamicLibrary.open(_resolveLibPath());
+    final fn = lib.lookupFunction<AvCancelScanNative, AvCancelScanDart>(
+      'av_cancel_scan',
     );
     fn();
   } catch (_) {}
@@ -112,6 +125,9 @@ typedef SetScanLimitsDart = void Function(int, int);
 typedef FreeStrNative = Void Function(Pointer<Utf8>);
 typedef FreeStrDart = void Function(Pointer<Utf8>);
 
+typedef ScanStatsNative = Pointer<Utf8> Function();
+typedef ScanStatsDart = Pointer<Utf8> Function();
+
 ScanLogFn? _scanLogSink;
 FreeStrDart? _scanLogFreeStr;
 
@@ -142,6 +158,8 @@ class AntivirusBridge {
   late final RestoreDecodeDart _restoreDecode;
   WatcherEvalDart? _watcherEval;
   SetScanLimitsDart? _setScanLimits;
+  ScanStatsDart? _scanStats;
+  FreeStrDart? _freeStr;
 
   final bool enableScanLogs;
   final ScanLogFn? scanLogSink;
@@ -177,6 +195,14 @@ class AntivirusBridge {
           );
     } catch (_) {
       _setScanLimits = null;
+    }
+
+    try {
+      _scanStats = _lib.lookupFunction<ScanStatsNative, ScanStatsDart>('av_scan_stats');
+      _freeStr = _lib.lookupFunction<FreeStrNative, FreeStrDart>('free_str');
+    } catch (_) {
+      _scanStats = null;
+      _freeStr = null;
     }
 
     if (enableScanLogs) {
@@ -262,6 +288,20 @@ class AntivirusBridge {
     }
     final s = resultPtr.toDartString();
     _free();
+    return s;
+  }
+
+  String? scanStats() {
+    final fn = _scanStats;
+    if (fn == null) {
+      return null;
+    }
+    final ptr = fn();
+    if (ptr == nullptr) {
+      return null;
+    }
+    final s = ptr.toDartString();
+    _freeStr?.call(ptr);
     return s;
   }
 
